@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>لوحة التوقيع</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/signature_pad@4.1.7/dist/signature_pad.umd.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--tg-theme-bg-color, #ffffff);
+      color: var(--tg-theme-text-color, #000000);
+      font-family: Arial, sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100dvh;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    #header {
+      padding: 14px 16px 10px;
+      text-align: center;
+      font-size: 14px;
+      color: var(--tg-theme-hint-color, #999999);
+    }
+
+    #canvas-wrap {
+      flex: 1;
+      margin: 0 12px;
+      border: 2px dashed var(--tg-theme-hint-color, #cccccc);
+      border-radius: 14px;
+      overflow: hidden;
+      background: #ffffff;
+      position: relative;
+    }
+
+    canvas {
+      display: block;
+      touch-action: none;
+    }
+
+    #hint {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+      color: #cccccc;
+      font-size: 15px;
+    }
+
+    #hint span { font-size: 36px; }
+
+    #buttons {
+      display: flex;
+      gap: 10px;
+      padding: 12px 12px 20px;
+    }
+
+    button {
+      flex: 1;
+      padding: 15px;
+      border: none;
+      border-radius: 12px;
+      font-size: 16px;
+      font-family: Arial, sans-serif;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    #btn-clear {
+      background: var(--tg-theme-secondary-bg-color, #f0f0f0);
+      color: var(--tg-theme-text-color, #333333);
+    }
+
+    #btn-done {
+      background: var(--tg-theme-button-color, #2481cc);
+      color: var(--tg-theme-button-text-color, #ffffff);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="header">وقّع داخل الإطار بإصبعك ثم اضغط تأكيد</div>
+
+  <div id="canvas-wrap">
+    <canvas id="sig"></canvas>
+    <div id="hint">
+      <span>✍️</span>
+      <div>ضع توقيعك هنا</div>
+    </div>
+  </div>
+
+  <div id="buttons">
+    <button id="btn-clear">مسح</button>
+    <button id="btn-done">✅ تأكيد</button>
+  </div>
+
+<script>
+  const tg = window.Telegram.WebApp;
+  tg.ready();
+  tg.expand();
+
+  const wrap   = document.getElementById('canvas-wrap');
+  const canvas = document.getElementById('sig');
+  const hint   = document.getElementById('hint');
+
+  const pad = new SignaturePad(canvas, {
+    backgroundColor: 'rgba(0,0,0,0)',
+    penColor: '#000000',
+    minWidth: 1.5,
+    maxWidth: 3.5,
+  });
+
+  function resizeCanvas() {
+    const ratio = window.devicePixelRatio || 1;
+    const w = wrap.clientWidth;
+    const h = wrap.clientHeight;
+    canvas.width  = w * ratio;
+    canvas.height = h * ratio;
+    canvas.style.width  = w + 'px';
+    canvas.style.height = h + 'px';
+    canvas.getContext('2d').scale(ratio, ratio);
+    pad.clear();
+  }
+
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  pad.addEventListener('beginStroke', () => { hint.style.display = 'none'; });
+
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    pad.clear();
+    hint.style.display = 'flex';
+  });
+
+  document.getElementById('btn-done').addEventListener('click', () => {
+    if (pad.isEmpty()) {
+      tg.showAlert('يرجى التوقيع أولاً');
+      return;
+    }
+    const dataUrl = buildSignaturePng();
+    if (!dataUrl) {
+      tg.showAlert('حجم التوقيع كبير جداً. يرجى تبسيطه أو المسح والمحاولة مجدداً.');
+      return;
+    }
+    tg.sendData(dataUrl);
+  });
+
+  function buildSignaturePng() {
+    const strokes = pad.toData();
+    if (!strokes.length) return null;
+
+    // Find the bounding box of actual ink
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    strokes.forEach(s => s.points.forEach(p => {
+      if (p.x < minX) minX = p.x;  if (p.y < minY) minY = p.y;
+      if (p.x > maxX) maxX = p.x;  if (p.y > maxY) maxY = p.y;
+    }));
+
+    const PAD = 12;
+    const srcW = maxX - minX + PAD * 2;
+    const srcH = maxY - minY + PAD * 2;
+
+    // Try progressively smaller sizes until the base64 fits Telegram's 4096-byte limit
+    for (let scale = 1.0; scale >= 0.15; scale -= 0.1) {
+      const tmp = document.createElement('canvas');
+      tmp.width  = Math.max(1, Math.ceil(srcW * scale));
+      tmp.height = Math.max(1, Math.ceil(srcH * scale));
+      const ctx = tmp.getContext('2d');
+
+      ctx.scale(scale, scale);
+      ctx.strokeStyle = '#000000';
+      ctx.lineCap     = 'round';
+      ctx.lineJoin    = 'round';
+      ctx.lineWidth   = 2.5 / scale;
+
+      strokes.forEach(s => {
+        if (s.points.length < 2) return;
+        ctx.beginPath();
+        ctx.moveTo(s.points[0].x - minX + PAD, s.points[0].y - minY + PAD);
+        for (let i = 1; i < s.points.length; i++) {
+          ctx.lineTo(s.points[i].x - minX + PAD, s.points[i].y - minY + PAD);
+        }
+        ctx.stroke();
+      });
+
+      const url = tmp.toDataURL('image/png');
+      if (url.length <= 4000) return url;
+    }
+    return null;  // could not fit even at minimum scale
+  }
+</script>
+</body>
+</html>
