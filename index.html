@@ -105,7 +105,15 @@
 <script>
   const tg = window.Telegram.WebApp;
   tg.ready();
-  tg.expand();
+
+  // Disable swipe-to-close so drawing gestures don't dismiss the app
+  if (tg.disableVerticalSwipes) tg.disableVerticalSwipes();
+
+  // Prevent iOS from treating canvas strokes as page-scroll gestures.
+  // { passive: false } is required so preventDefault() is honoured on touchmove.
+  document.addEventListener('touchmove', function(e) {
+    e.preventDefault();
+  }, { passive: false });
 
   const wrap   = document.getElementById('canvas-wrap');
   const canvas = document.getElementById('sig');
@@ -119,28 +127,57 @@
   });
 
   function resizeCanvas() {
-    const ratio = window.devicePixelRatio || 1;
     const w = wrap.clientWidth;
     const h = wrap.clientHeight;
-    canvas.width  = w * ratio;
-    canvas.height = h * ratio;
+    if (!w || !h) return;                        // skip if layout not ready
+
+    const ratio = window.devicePixelRatio || 1;
+
+    // Preserve existing strokes across resizes instead of wiping them
+    const hadStrokes = !pad.isEmpty();
+    const savedData  = hadStrokes ? pad.toData() : null;
+
+    canvas.width        = w * ratio;
+    canvas.height       = h * ratio;
     canvas.style.width  = w + 'px';
     canvas.style.height = h + 'px';
     canvas.getContext('2d').scale(ratio, ratio);
     pad.clear();
+
+    if (hadStrokes && savedData) pad.fromData(savedData);
   }
 
-  resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
+  // Wait for the viewport to finish expanding before sizing the canvas.
+  // Sizing too early causes every touch coordinate to be offset.
+  let initialized = false;
 
-  pad.addEventListener('beginStroke', () => { hint.style.display = 'none'; });
+  function initCanvas() {
+    if (initialized) return;
+    initialized = true;
+    resizeCanvas();
+  }
 
-  document.getElementById('btn-clear').addEventListener('click', () => {
+  // Primary trigger: Telegram fires viewportChanged with isStateStable=true
+  // when expansion is fully complete.
+  tg.onEvent('viewportChanged', function(params) {
+    if (params.isStateStable) initCanvas();
+  });
+
+  // Fallback: if the event does not fire (older Telegram versions), init after
+  // 400 ms — enough for expansion to settle on both iOS and Android.
+  tg.expand();
+  setTimeout(initCanvas, 400);
+
+  pad.addEventListener('beginStroke', function() {
+    hint.style.display = 'none';
+  });
+
+  document.getElementById('btn-clear').addEventListener('click', function() {
     pad.clear();
     hint.style.display = 'flex';
   });
 
-  document.getElementById('btn-done').addEventListener('click', () => {
+  document.getElementById('btn-done').addEventListener('click', function() {
     if (pad.isEmpty()) {
       tg.showAlert('يرجى التوقيع أولاً');
       return;
@@ -157,23 +194,21 @@
     const strokes = pad.toData();
     if (!strokes.length) return null;
 
-    // Find the bounding box of actual ink
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     strokes.forEach(s => s.points.forEach(p => {
       if (p.x < minX) minX = p.x;  if (p.y < minY) minY = p.y;
       if (p.x > maxX) maxX = p.x;  if (p.y > maxY) maxY = p.y;
     }));
 
-    const PAD = 12;
+    const PAD  = 12;
     const srcW = maxX - minX + PAD * 2;
     const srcH = maxY - minY + PAD * 2;
 
-    // Try progressively smaller sizes until the base64 fits Telegram's 4096-byte limit
     for (let scale = 1.0; scale >= 0.15; scale -= 0.1) {
       const tmp = document.createElement('canvas');
       tmp.width  = Math.max(1, Math.ceil(srcW * scale));
       tmp.height = Math.max(1, Math.ceil(srcH * scale));
-      const ctx = tmp.getContext('2d');
+      const ctx  = tmp.getContext('2d');
 
       ctx.scale(scale, scale);
       ctx.strokeStyle = '#000000';
@@ -194,7 +229,7 @@
       const url = tmp.toDataURL('image/png');
       if (url.length <= 4000) return url;
     }
-    return null;  // could not fit even at minimum scale
+    return null;
   }
 </script>
 </body>
